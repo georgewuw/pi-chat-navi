@@ -3,9 +3,9 @@
  *
  * `/questions [宽度]` — 打开/关闭「用户提问列表」浮动面板（停靠右上角）：
  *   - 列出当前 transcript 中可见的用户提问（序号 + 摘要；压缩感知）
- *   - 鼠标点击条目 → transcript 滚动到该提问处；回合分析详情区可用滚轮滚动
- *   - 键盘：↑↓ 选择、回车跳转（作用于当前高亮项，鼠标悬停优先）、Esc 关闭
- *   - 鼠标悬停只做高亮预览：↑↓ 会清除悬停，保证回车目标与看到的高亮一致
+ *   - 鼠标：仅回合分析详情区滚轮（右侧滚动条）；单击/双击/悬停均无效果
+ *   - 键盘：↑↓ 选择、回车跳转（作用于当前选中项）、Esc 关闭
+ *   - 鼠标：点击跳转/进入分析；悬停无效果；回合分析详情区支持滚轮
  *   - 宽度：默认 60%；/questions 50（列数）或 /questions 60%（百分比）调整，会话内记忆；
  *     面板打开时带参数会以新宽度重开
  *
@@ -266,9 +266,8 @@ export function jumpToQuestionText(tui: TUI, questionText: string, occurrence: n
 // ---------------------------------------------------------------------------
 
 const MAX_VISIBLE_ROWS = 18;
-/** 回合分析：树可视行数 / 详情区行数 */
-const TREE_VISIBLE_ROWS = 8;
-const DETAIL_ROWS = 10;
+/** 面板最大高度占终端行数的比例（与 overlayOptions.maxHeight 保持一致） */
+const PANEL_HEIGHT_RATIO = 0.7;
 
 export class QuestionPanelComponent implements Component {
 	private readonly tui: TUI;
@@ -280,8 +279,6 @@ export class QuestionPanelComponent implements Component {
 	private readonly turnLoader: (ordinal: number) => TurnData | null;
 
 	private selected = 0;
-	/** 鼠标悬停的条目序号；null 表示无 */
-	private hover: number | null = null;
 	/** 列表滚动偏移（条目数） */
 	private offset = 0;
 	private version = 0;
@@ -295,11 +292,9 @@ export class QuestionPanelComponent implements Component {
 	private nodeSel = 0;
 	private treeOffset = 0;
 	private detailOffset = 0;
-	private hoverNode: number | null = null;
+	/** 上次渲染的详情总行数（用于滚轮 clamp） */
+	private detailLen = 0;
 
-	// render 时记录的命中区域
-	private itemYs: number[] = [];
-	private nodeYs: number[] = [];
 	/** 详情内容行范围（含端点） */
 	private detailTop = -1;
 	private detailBottom = -1;
@@ -326,7 +321,7 @@ export class QuestionPanelComponent implements Component {
 		this.turnLoader = turnLoader;
 		this.onClose = onClose;
 		this.selected = items.length - 1;
-		this.itemYs = new Array(items.length).fill(-1);
+		this.ensureSelectedVisible();
 	}
 
 	close(): void {
@@ -344,11 +339,10 @@ export class QuestionPanelComponent implements Component {
 	}
 
 	private visibleCount(): number {
-		return Math.min(this.items.length, MAX_VISIBLE_ROWS);
-	}
-
-	private maxOffset(): number {
-		return Math.max(0, this.items.length - this.visibleCount());
+		// 列表固定行：顶/底边框、上下空行、提示行（5）+ 上/下 more 提示（≤2）
+		const terminalRows = this.tui.terminal?.rows ?? 40;
+		const budget = Math.max(3, Math.floor(terminalRows * PANEL_HEIGHT_RATIO) - 7);
+		return Math.min(this.items.length, MAX_VISIBLE_ROWS, budget);
 	}
 
 	private ensureSelectedVisible(): void {
@@ -368,9 +362,21 @@ export class QuestionPanelComponent implements Component {
 		return this.chainOnly ? this.turn.nodes.filter((n) => n.kind === "thinking") : this.turn.nodes;
 	}
 
+	/**
+	 * 回合分析可用行数：按终端高度分配节点区/详情区。
+	 * 固定行：顶/底边框、提问行、3 条分隔线、2 个区块标题、提示行（共 9 行）。
+	 */
+	private turnLayout(): { treeRows: number; detailRows: number } {
+		const terminalRows = this.tui.terminal?.rows ?? 40;
+		const panelRows = Math.max(12, Math.floor(terminalRows * PANEL_HEIGHT_RATIO));
+		const contentRows = Math.max(4, panelRows - 9);
+		const treeRows = Math.max(2, Math.min(8, Math.round(contentRows * 0.4)));
+		return { treeRows, detailRows: Math.max(2, contentRows - treeRows) };
+	}
+
 	private ensureNodeVisible(): void {
 		const total = this.visibleNodes().length;
-		const view = Math.min(total, TREE_VISIBLE_ROWS);
+		const view = Math.min(total, this.turnLayout().treeRows);
 		if (this.nodeSel < this.treeOffset) this.treeOffset = this.nodeSel;
 		if (this.nodeSel > this.treeOffset + view - 1) this.treeOffset = this.nodeSel - view + 1;
 		this.treeOffset = Math.max(0, Math.min(Math.max(0, total - view), this.treeOffset));
@@ -385,7 +391,7 @@ export class QuestionPanelComponent implements Component {
 		this.bump();
 	}
 
-	/** 列表双击/d：进入该提问的回合分析 */
+	/** 列表 d/→：进入该提问的回合分析 */
 	private enterTurn(index: number): void {
 		const turn = this.turnLoader(this.items[index]!.index);
 		if (!turn) return;
@@ -396,8 +402,6 @@ export class QuestionPanelComponent implements Component {
 		this.nodeSel = 0;
 		this.treeOffset = 0;
 		this.detailOffset = 0;
-		this.hover = null;
-		this.hoverNode = null;
 		this.bump();
 	}
 
@@ -405,8 +409,6 @@ export class QuestionPanelComponent implements Component {
 		this.view = "list";
 		this.turn = null;
 		this.mdCache = null;
-		this.hover = null;
-		this.hoverNode = null;
 		this.bump();
 	}
 
@@ -417,13 +419,10 @@ export class QuestionPanelComponent implements Component {
 				return true;
 			}
 			if (matchesKey(data, "up")) {
-				// 键盘导航时清除鼠标悬停，否则悬停项会盖住键盘选中项（看起来像没反应）
-				this.hoverNode = null;
 				this.selectNode(this.nodeSel - 1);
 				return true;
 			}
 			if (matchesKey(data, "down")) {
-				this.hoverNode = null;
 				this.selectNode(this.nodeSel + 1);
 				return true;
 			}
@@ -449,8 +448,6 @@ export class QuestionPanelComponent implements Component {
 			return true;
 		}
 		if (matchesKey(data, "up")) {
-			// 键盘导航时清除鼠标悬停，否则悬停项会盖住键盘选中项（看起来像没反应）
-			this.hover = null;
 			if (this.selected > 0) {
 				this.selected--;
 				this.ensureSelectedVisible();
@@ -459,7 +456,6 @@ export class QuestionPanelComponent implements Component {
 			return true;
 		}
 		if (matchesKey(data, "down")) {
-			this.hover = null;
 			if (this.selected < this.items.length - 1) {
 				this.selected++;
 				this.ensureSelectedVisible();
@@ -468,8 +464,8 @@ export class QuestionPanelComponent implements Component {
 			return true;
 		}
 		if (matchesKey(data, "return") || data === " ") {
-			// 回车/空格：与点击一致，作用于当前高亮项（悬停优先于键盘选中）
-			this.jumpTo(this.hover !== null ? this.hover : this.selected);
+			// 回车/空格：与点击一致，作用于当前选中项
+			this.jumpTo(this.selected);
 			return true;
 		}
 		if (data === "d" || data === "D" || matchesKey(data, "right")) {
@@ -479,69 +475,23 @@ export class QuestionPanelComponent implements Component {
 		return true;
 	}
 
-	private nodeAt(y: number): number {
-		for (let i = 0; i < this.nodeYs.length; i++) {
-			if (this.nodeYs[i] === y) return i;
-		}
-		return -1;
-	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		if (event.type === "move") {
-			if (this.view === "turn") {
-				const pos = this.nodeAt(event.y);
-				const next = pos >= 0 ? pos : null;
-				if (next !== this.hoverNode) {
-					this.hoverNode = next;
-					this.bump();
-				}
-				return { handled: true, render: false };
-			}
-			const pos = this.itemAt(event.y);
-			const next = pos >= 0 ? pos : null;
-			if (next !== this.hover) {
-				this.hover = next;
-				this.bump();
-			}
-			return { handled: true, render: false };
-		}
-
 		if (event.type === "wheel" && this.view === "turn") {
 			// 仅保留回合分析详情区的滚轮滚动（列表与节点树不响应滚轮）
 			if (event.y >= this.detailTop && event.y <= this.detailBottom) {
 				const step = Math.max(-3, Math.min(3, event.wheelDelta ?? -1));
-				if (step !== 0) {
-					this.detailOffset = Math.max(0, this.detailOffset + step);
+				const maxOffset = Math.max(0, this.detailLen - this.turnLayout().detailRows);
+				const next = Math.max(0, Math.min(maxOffset, this.detailOffset + step));
+				if (next !== this.detailOffset) {
+					this.detailOffset = next;
 					this.bump();
 				}
 			}
 			return { handled: true, render: true };
 		}
 
-		if (event.type === "click" && event.button === "left") {
-			if (this.view === "turn") {
-				const pos = this.nodeAt(event.y);
-				if (pos >= 0) this.selectNode(pos);
-				return { handled: true, render: false };
-			}
-			const idx = this.itemAt(event.y);
-			if (idx >= 0) {
-				// 双击进入回合分析；单击跳转定位
-				if (event.clickCount === 2) this.enterTurn(idx);
-				else this.jumpTo(idx);
-			}
-			return { handled: true, render: false };
-		}
-
 		return { handled: true, render: false };
-	}
-
-	/** y 行对应的条目序号；不在条目行上返回 -1。 */
-	private itemAt(y: number): number {
-		for (let i = 0; i < this.itemYs.length; i++) {
-			if (this.itemYs[i] === y) return i;
-		}
-		return -1;
 	}
 
 	render(width: number): string[] {
@@ -558,44 +508,54 @@ export class QuestionPanelComponent implements Component {
 	private renderList(width: number): string[] {
 		const theme = this.theme;
 		const lines: string[] = [];
-		this.itemYs = new Array(this.items.length).fill(-1);
 
-		const innerW = Math.max(10, width - 2);
-		// 内容行：│ + 填充到 innerW + │
-		const boxLine = (body: string): string => {
-			const padded = body + " ".repeat(Math.max(0, innerW - visibleWidth(body)));
-			return "│" + truncateToWidth(padded, innerW, "") + "│";
+		// 与 pi-session-nav 一致：重线框 + border 颜色（主题里 border 是蓝色）、内容两侧各留 1 格
+		const innerW = Math.max(1, width - 2);
+		const contentW = Math.max(1, innerW - 2);
+		const border = (text: string): string => theme.fg("border", text);
+		const padded = (body: string): string => {
+			const fitted = truncateToWidth(body, contentW, "…");
+			return ` ${fitted}${ " ".repeat(Math.max(0, contentW - visibleWidth(fitted))) } `;
 		};
+		const row = (body: string): string => border("┃") + padded(body) + border("┃");
 
-		// 顶边框：┌─ 提问列表（N）──────┐
-		const titleSeg = "─" + theme.fg("accent", theme.bold(` 提问列表（${this.items.length}）`)) + "─";
-		const fill = Math.max(0, width - 2 - visibleWidth(titleSeg));
-		const top = "┌" + titleSeg + theme.fg("dim", "─".repeat(fill)) + "┐";
-		lines.push(truncateToWidth(top, width, ""));
+		// 顶边框：┏ Navigate conversation · N messages ━━━┓
+		const title = truncateToWidth(
+			` Navigate conversation · ${this.items.length} messages `,
+			Math.max(1, innerW - 1),
+			"…",
+		);
+		lines.push(border(`┏${title}${"━".repeat(Math.max(0, innerW - visibleWidth(title)))}┓`));
+		lines.push(row(""));
+
+		// 列表上方的省略提示行（仅展示，不可选中）
+		const count = this.visibleCount();
+		if (this.offset > 0) lines.push(row(theme.fg("dim", "  ↑ more")));
 
 		// 条目行
-		const count = this.visibleCount();
-		for (let row = 0; row < count; row++) {
-			const idx = this.offset + row;
+		for (let rowIdx = 0; rowIdx < count; rowIdx++) {
+			const idx = this.offset + rowIdx;
 			if (idx >= this.items.length) break;
 			const item = this.items[idx]!;
-			const active = this.hover === idx || (this.hover === null && this.selected === idx);
+			const active = this.selected === idx;
 			const marker = active ? "> " : "  ";
 			const num = String(idx + 1).padStart(2, " ");
-			const body = truncateToWidth(`${marker}${num} ${item.summary}`, innerW, "…");
-			lines.push(boxLine(active ? theme.style(body, { fg: "accent", bold: true }) : body));
-			this.itemYs[idx] = lines.length - 1;
+			const body = padded(`${marker}${num} ${item.summary}`);
+			lines.push(
+				border("┃") +
+					(active ? theme.style(body, { fg: "accent", bold: true }) : body) +
+					border("┃"),
+			);
 		}
 
-		// 分隔线 + 底部提示 + 底边框
-		lines.push("├" + "─".repeat(innerW) + "┤");
-		const range =
-			this.maxOffset() > 0
-				? `（${this.offset + 1}-${Math.min(this.items.length, this.offset + count)}/${this.items.length}）`
-				: "";
-		const hint = ` 回车/点击 跳转 · 双击/d 分析 · ↑↓ 选择${range} · Esc 关闭 `;
-		lines.push(boxLine(theme.fg("dim", truncateToWidth(hint, innerW, "…"))));
-		lines.push("└" + "─".repeat(innerW) + "┘");
+		// 列表下方的省略提示行（仅展示，不可选中）
+		if (this.offset + count < this.items.length) lines.push(row(theme.fg("dim", "  ↓ more")));
+
+		// 底部：空行 + dim 提示 + 底边框（与 pi-session-nav 一致）
+		lines.push(row(""));
+		const hint = `↑↓ select · Enter jump · →/d analyze · Esc close`;
+		lines.push(row(theme.fg("dim", hint)));
+		lines.push(border("┗" + "━".repeat(innerW) + "┛"));
 
 		return lines;
 	}
@@ -608,97 +568,127 @@ export class QuestionPanelComponent implements Component {
 		const theme = this.theme;
 		const turn = this.turn!;
 		const lines: string[] = [];
-		const innerW = Math.max(10, width - 2);
-		const boxLine = (body: string): string => {
-			const padded = body + " ".repeat(Math.max(0, innerW - visibleWidth(body)));
-			return "│" + truncateToWidth(padded, innerW, "") + "│";
+		const innerW = Math.max(1, width - 2);
+		const contentW = Math.max(1, innerW - 2);
+		const border = (text: string): string => theme.fg("border", text);
+		const padded = (body: string): string => {
+			const fitted = truncateToWidth(body, contentW, "…");
+			return ` ${fitted}${ " ".repeat(Math.max(0, contentW - visibleWidth(fitted))) } `;
 		};
+		const row = (body: string): string => border("┃") + padded(body) + border("┃");
+		const separator = (): string => border("┣" + "━".repeat(innerW) + "┫");
+		const header = (left: string, right: string): string => {
+			if (!right) return left;
+			const gap = contentW - visibleWidth(left) - visibleWidth(right);
+			return gap >= 1 ? left + " ".repeat(gap) + right : truncateToWidth(`${left} ${right}`, contentW, "…");
+		};
+		const { treeRows, detailRows } = this.turnLayout();
 
-		// 顶边框：┌─ 回合分析 · 第N问 ────┐
-		const titleSeg =
-			"─" + theme.fg("accent", theme.bold(` 回合分析 · 第${turn.question.index + 1}问 `)) + "─";
-		const fill = Math.max(0, width - 2 - visibleWidth(titleSeg));
-		const top = "┌" + titleSeg + theme.fg("dim", "─".repeat(fill)) + "┐";
-		lines.push(truncateToWidth(top, width, ""));
+		// 顶边框：┏ Analysis · QN ━━━┓
+		const title = truncateToWidth(
+			` Analysis · Q${turn.question.index + 1} `,
+			Math.max(1, innerW - 1),
+			"…",
+		);
+		lines.push(border(`┏${title}${"━".repeat(Math.max(0, innerW - visibleWidth(title)))}┓`));
 
 		// 提问行
-		lines.push(boxLine(theme.fg("dim", truncateToWidth(` 问  ${turn.question.summary}`, innerW, "…"))));
+		lines.push(row(`${theme.fg("accent", "Question:")}  ${turn.question.summary}`));
+		lines.push(separator());
 
-		// 节点树
+		// 节点区：标题行（左：选中序号/总数，右：可视范围）+ 固定行数的节点列表
 		const nodes = this.visibleNodes();
-		this.nodeYs = new Array(nodes.length).fill(-1);
-		const view = Math.min(nodes.length, TREE_VISIBLE_ROWS);
-		for (let row = 0; row < view; row++) {
-			const pos = this.treeOffset + row;
-			if (pos >= nodes.length) break;
-			const node = nodes[pos]!;
-			const connector = pos === nodes.length - 1 ? "└─" : "├─";
-			const active = this.hoverNode === pos || (this.hoverNode === null && this.nodeSel === pos);
+		const view = Math.min(nodes.length, treeRows);
+		const selectedLabel = nodes.length === 0 ? "0/0" : `${this.nodeSel + 1}/${nodes.length}`;
+		const nodeRange =
+			nodes.length > view
+				? `${this.treeOffset + 1}-${Math.min(nodes.length, this.treeOffset + view)}/${nodes.length}`
+				: "";
+		const nodeHeader = `${theme.fg("accent", "Nodes")}${theme.fg("dim", ` · ${selectedLabel}${this.chainOnly ? " · thinking only" : ""}`)}`;
+		lines.push(row(header(nodeHeader, nodeRange ? theme.fg("dim", nodeRange) : "")));
+
+		for (let r = 0; r < treeRows; r++) {
+			const pos = this.treeOffset + r;
+			const node = pos < nodes.length ? nodes[pos] : undefined;
+			if (!node) {
+				lines.push(row(r === 0 && nodes.length === 0 ? theme.fg("dim", "(no nodes)") : ""));
+				continue;
+			}
+			const active = pos === this.nodeSel;
 			let label: string;
 			let summary: string;
 			switch (node.kind) {
 				case "thinking":
-					label = "思考";
-					summary = firstLine(node.text) || "(空)";
+					label = "Thinking";
+					summary = firstLine(node.text) || "(Empty)";
 					break;
 				case "text":
-					label = node.isFinal ? "输出" : "文本";
+					label = node.isFinal ? "Output" : "Text";
 					summary = firstLine(node.text);
 					break;
 				case "tool": {
-					label = "工具";
+					label = "Tool";
 					const status =
-						node.result === null ? "·无结果" : node.isError ? "·出错" : `·${node.result.split("\n").length}行`;
+						node.result === null ? "·no result" : node.isError ? "·error" : `·${node.result.split("\n").length} lines`;
 					summary = `${node.name} ${briefArgs(node.args)} ${status}`;
 					break;
 				}
 			}
-			const head = `${connector} ${label} `;
-			const body = head + truncateToWidth(summary, Math.max(4, innerW - visibleWidth(head) - 1), "…");
-			lines.push(boxLine(active ? theme.style(body, { fg: "accent", bold: true }) : body));
-			this.nodeYs[pos] = lines.length - 1;
+			const marker = active ? "› " : "  ";
+			const body = `${marker}${label.padEnd(9)}${summary}`;
+			lines.push(
+				border("┃") +
+					(active ? theme.style(padded(body), { fg: "accent", bold: true }) : padded(body)) +
+					border("┃"),
+			);
 		}
 
-		// 详情标题（含树滚动范围与思维链标记）
-		lines.push("├" + "─".repeat(innerW) + "┤");
+		lines.push(separator());
+
+		// 详情区：标题行（左：类型，右：可视范围）+ 内容（右边框列兼作滚动条）
 		const selNode = nodes[this.nodeSel];
 		const kindLabel = selNode
 			? selNode.kind === "thinking"
-				? "思考"
+				? "Thinking"
 				: selNode.kind === "tool"
-					? `工具 ${selNode.name}`
+					? `Tool ${selNode.name}${selNode.isError ? " (error)" : ""}`
 					: selNode.isFinal
-						? "输出（Markdown）"
-						: "文本"
-			: "（无节点）";
-		const treeRange =
-			nodes.length > view
-				? ` ${this.treeOffset + 1}-${Math.min(nodes.length, this.treeOffset + view)}/${nodes.length}`
-				: "";
-		const detailTitle = ` 详情 · ${kindLabel}${treeRange}${this.chainOnly ? " · 仅思维链" : ""} `;
-		lines.push(
-			"├" +
-				theme.fg("dim", detailTitle) +
-				theme.fg("dim", "─".repeat(Math.max(0, innerW - visibleWidth(detailTitle)))) +
-				"┤",
-		);
+						? "Output (Markdown)"
+						: "Text"
+			: "(no node)";
+		const detail = selNode ? this.detailLines(selNode, contentW) : ["(no node)"];
+		this.detailLen = detail.length;
+		const maxDetailOffset = Math.max(0, detail.length - detailRows);
+		const start = Math.max(0, Math.min(this.detailOffset, maxDetailOffset));
+		const scrollable = detail.length > detailRows;
+		const detailRange = scrollable
+			? `${start + 1}-${Math.min(detail.length, start + detailRows)}/${detail.length}`
+			: "";
+		const detailHeader = `${theme.fg("accent", "Detail")}${theme.fg("dim", ` · ${kindLabel}`)}`;
+		lines.push(row(header(detailHeader, detailRange ? theme.fg("dim", detailRange) : "")));
 
-		// 详情内容
-		const dw = Math.max(8, innerW - 2);
-		const detail = selNode ? this.detailLines(selNode, dw) : ["(无节点)"];
+		const thumbSize = scrollable
+			? Math.max(1, Math.min(detailRows, Math.round((detailRows * detailRows) / detail.length)))
+			: 0;
+		const thumbTop =
+			scrollable && maxDetailOffset > 0 ? Math.round((start / maxDetailOffset) * (detailRows - thumbSize)) : 0;
 		this.detailTop = lines.length;
-		for (let r = 0; r < DETAIL_ROWS; r++) {
-			const idx = this.detailOffset + r;
+		for (let r = 0; r < detailRows; r++) {
+			const idx = start + r;
 			const text = idx < detail.length ? detail[idx]! : "";
-			lines.push(boxLine(" " + text));
+			const right = !scrollable
+				? border("┃")
+				: r >= thumbTop && r < thumbTop + thumbSize
+					? theme.fg("borderAccent", "█")
+					: theme.fg("borderMuted", "│");
+			lines.push(border("┃") + padded(text) + right);
 		}
 		this.detailBottom = lines.length - 1;
 
-		// 底部提示 + 底边框
-		lines.push("├" + "─".repeat(innerW) + "┤");
-		const hint = ` ↑↓ 节点 · 回车 定位提问 · t 仅思维链(${this.chainOnly ? "开" : "关"}) · ←/Esc 返回 · 滚轮 详情 `;
-		lines.push(boxLine(theme.fg("dim", truncateToWidth(hint, innerW, "…"))));
-		lines.push("└" + "─".repeat(innerW) + "┘");
+		lines.push(separator());
+		const hint = `↑↓ select · ←/Esc back · t ${this.chainOnly ? "thinking-only" : "all"} · wheel detail`;
+		lines.push(row(theme.fg("dim", hint)));
+		lines.push(border("┗" + "━".repeat(innerW) + "┛"));
 
 		return lines;
 	}
@@ -712,7 +702,7 @@ export class QuestionPanelComponent implements Component {
 				const wrapped = wrapTextWithAnsi(line, dw);
 				out.push(...(wrapped.length > 0 ? wrapped : [""]));
 			}
-			return out.length > 0 ? out : ["(空)"];
+			return out.length > 0 ? out : ["(Empty)"];
 		};
 
 		if (node.kind === "thinking") return wrap(node.text);
@@ -733,12 +723,8 @@ export class QuestionPanelComponent implements Component {
 			}
 		}
 
-		// 工具节点：名称 + 参数 + 结果
-		const head: string[] = [
-			theme.fg("accent", `工具 ${node.name}`) + (node.isError ? "  " + theme.fg("error", "出错") : ""),
-			"",
-			theme.fg("dim", "参数:"),
-		];
+		// 工具节点：参数 + 结果（名称/错误状态已在详情标题里）
+		const head: string[] = [theme.fg("dim", "Args:")];
 		let argsLines: string[];
 		try {
 			const s = typeof node.args === "string" ? node.args : (JSON.stringify(node.args, null, 2) ?? String(node.args));
@@ -748,8 +734,8 @@ export class QuestionPanelComponent implements Component {
 		}
 		const resHead =
 			node.result === null
-				? ["", theme.fg("dim", "结果: (未返回)")]
-				: ["", theme.fg("dim", `结果${node.isError ? "(出错)" : ""}:`)];
+				? ["", theme.fg("dim", "Result: (not returned)")]
+				: ["", theme.fg("dim", `Result${node.isError ? " (error)" : ""}:`)];
 		const resLines = node.result === null ? [] : wrap(node.result);
 		return [...head, ...argsLines, ...resHead, ...resLines];
 	}
@@ -771,30 +757,30 @@ export default function (pi: ExtensionAPI) {
 		if (!t) return null;
 		const m = /^(\d{1,3})(%?)$/.exec(t);
 		if (!m) {
-			notify("宽度参数非法；用法：/questions 50（列）或 /questions 60%（百分比）", "warning");
+			notify("Invalid width; usage: /questions 50 (columns) or /questions 60% (percentage)", "warning");
 			return false;
 		}
 		const n = Number(m[1]);
 		if (m[2]) {
 			if (n < 20 || n > 100) {
-				notify("百分比宽度需在 20–100 之间", "warning");
+				notify("Percentage width must be between 20 and 100", "warning");
 				return false;
 			}
 			return `${n}%` as SizeValue;
 		}
 		if (n < 30 || n > 500) {
-			notify("列宽度需在 30–500 之间", "warning");
+			notify("Column width must be between 30 and 500", "warning");
 			return false;
 		}
 		return n;
 	}
 
 	pi.registerCommand("questions", {
-		description:
-			"打开/关闭提问列表面板（单击跳转、双击进入回合分析；/questions 50 或 /questions 60% 调整宽度）",
+			description:
+			"Open/close the questions panel (click to jump, double-click for turn analysis; /questions 50 or /questions 60% sets width)",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
-				ctx.ui.notify("question-panel 需要交互式（tui）模式", "error");
+				ctx.ui.notify("question-panel requires interactive (tui) mode", "error");
 				return;
 			}
 
@@ -809,7 +795,7 @@ export default function (pi: ExtensionAPI) {
 
 			const questions = collectQuestions(ctx);
 			if (questions.length === 0) {
-				ctx.ui.notify("当前会话还没有用户提问", "info");
+				ctx.ui.notify("No user questions in this session yet", "info");
 				return;
 			}
 
@@ -829,7 +815,7 @@ export default function (pi: ExtensionAPI) {
 								.slice(0, index)
 								.filter((q) => normalizeMatchText(q.text) === normalized).length;
 							if (!jumpToQuestionText(tui, item.text, occurrence)) {
-								ctx.ui.notify("跳转失败：无法定位 transcript（pi 内部结构可能已变化）", "warning");
+								ctx.ui.notify("Jump failed: cannot locate transcript (pi internals may have changed)", "warning");
 							}
 						},
 						(ordinal) => buildTurn(ctx, ordinal),
@@ -848,7 +834,7 @@ export default function (pi: ExtensionAPI) {
 						margin: 1,
 						width: panelWidth,
 						minWidth: 36,
-						maxHeight: "70%",
+						maxHeight: `${Math.round(PANEL_HEIGHT_RATIO * 100)}%`,
 					},
 				},
 			);

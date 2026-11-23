@@ -124,7 +124,7 @@ export function collectQuestionsFromEntries(entries: SessionEntryLike[]): Questi
 		out.push({
 			index: out.length,
 			text,
-			summary: firstLine(text) || "[空白消息]",
+			summary: firstLine(text) || "[empty message]",
 		});
 	}
 	return out;
@@ -195,7 +195,7 @@ export function buildTurnFromEntries(entries: SessionEntryLike[], ordinal: numbe
 				question = {
 					index: ordinal,
 					text,
-					summary: firstLine(text) || "[空白消息]",
+					summary: firstLine(text) || "[empty message]",
 				};
 			}
 			questionOrdinal++;
@@ -230,7 +230,7 @@ export function buildTurnFromEntries(entries: SessionEntryLike[], ordinal: numbe
 		} else if (msg.role === "toolResult") {
 			const node = msg.toolCallId ? pendingTools.get(msg.toolCallId) : undefined;
 			if (node) {
-				node.result = partText(msg.content).trim() || "(空)";
+				node.result = partText(msg.content).trim() || "(empty)";
 				node.isError = msg.isError === true;
 				pendingTools.delete(msg.toolCallId!);
 			}
@@ -240,7 +240,7 @@ export function buildTurnFromEntries(entries: SessionEntryLike[], ordinal: numbe
 				id: nodes.length,
 				name: "!bash",
 				args: msg.command ?? "",
-				result: (msg.output ?? "").trim() || "(空)",
+				result: (msg.output ?? "").trim() || "(empty)",
 				isError: msg.exitCode !== undefined && msg.exitCode !== 0,
 			});
 		}
