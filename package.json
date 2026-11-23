@@ -18,18 +18,18 @@
 		"node": ">=22.19"
 	},
 	"files": [
-		"index.ts",
-		"question-panel.ts",
-		"question-logic.ts",
+		"src",
 		"README.md",
 		"LICENSE"
 	],
 	"scripts": {
-		"test": "node --test"
+		"typecheck": "tsc -p .",
+		"test:compat": "node scripts/compat.mjs",
+		"test": "node --test test/logic.test.mjs test/contract.test.mjs"
 	},
 	"pi": {
 		"extensions": [
-			"./index.ts"
+			"./src/index.ts"
 		]
 	},
 	"peerDependencies": {
@@ -43,5 +43,11 @@
 		"@earendil-works/pi-tui": {
 			"optional": true
 		}
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^1.6.0",
+		"@earendil-works/pi-tui": "^1.6.0",
+		"@types/node": "^26.6.6",
+		"typescript": "^7.0.2"
 	}
 }

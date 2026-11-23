@@ -7,7 +7,9 @@ import {
 	extractUserText,
 	markerOrdinalFromEntries,
 	normalizeMatchText,
-} from "../question-logic.ts";
+	occurrenceOf,
+	remapQuestionIndex,
+} from "../src/logic.ts";
 
 const text = (value) => [{ type: "text", text: value }];
 const user = (id, content, timestamp = 42) => ({
@@ -117,11 +119,56 @@ test("normalizeMatchText handles whitespace and unicode normalization", () => {
 	assert.equal(normalizeMatchText("ＡＢＣ　１２３"), "abc 123");
 });
 
-test("extractUserText joins text parts only", () => {
+test("extractUserText joins text parts like pi's getUserMessageText (no separator)", () => {
 	assert.equal(extractUserText("raw"), "raw");
 	assert.equal(
 		extractUserText([{ type: "text", text: "a" }, { type: "image" }, { type: "text", text: "b" }]),
-		"a\nb",
+		"ab",
 	);
 	assert.equal(extractUserText([{ type: "image" }]), "");
+});
+
+const skillBlock = (extra) =>
+	`<skill name="review" location="/skills/review/SKILL.md">\nSKILL BODY\n</skill>${extra === undefined ? "" : `\n\n${extra}`}`;
+
+test("skill messages: only the user's extra text is a question; skill-only has no marker", () => {
+	const branch = [
+		user("u1", "plain"),
+		assistant("a1", text("reply")),
+		user("u2", skillBlock("please review this")),
+		assistant("a2", text("done")),
+		user("u3", skillBlock()),
+		assistant("a3", text("ok")),
+		user("u4", "after skill"),
+	];
+	const questions = collectQuestionsFromEntries(branch);
+	// skill-only（u3）不渲染 UserMessageComponent：不进列表
+	assert.deepEqual(questions.map((q) => q.text), ["plain", "please review this", "after skill"]);
+	assert.equal(questions[1].entryId, "u2");
+	// u1 标记 0，a1 标记 1，u2 附加文本标记 2，a2 标记 3，u3 无标记，a3 标记 4，u4 标记 5
+	assert.equal(markerOrdinalFromEntries(branch, 1), 2);
+	assert.equal(markerOrdinalFromEntries(branch, 2), 5);
+});
+
+test("remapQuestionIndex finds the same question after compaction or appends", () => {
+	const q = (text, entryId) => ({ index: 0, text, summary: text, ...(entryId ? { entryId } : {}) });
+	// 按 entryId：追加和压缩都能精确找回
+	const snapshot = [q("A", "e1"), q("B", "e2"), q("A", "e3")];
+	assert.equal(remapQuestionIndex(snapshot, 2, [...snapshot, q("C", "e4")]), 2);
+	assert.equal(remapQuestionIndex(snapshot, 2, [q("B", "e2"), q("A", "e3")]), 1);
+	assert.equal(remapQuestionIndex(snapshot, 0, [q("B", "e2"), q("A", "e3")]), -1);
+
+	// 无 entryId：重复提问被压缩掉靠前一份时，仍能找到后一份；被压缩掉的那份返回 -1，不去猜
+	const bare = [q("A"), q("B"), q("A")];
+	assert.equal(remapQuestionIndex(bare, 2, [q("B"), q("A")]), 1);
+	assert.equal(remapQuestionIndex(bare, 0, [q("B"), q("A")]), -1);
+	assert.equal(remapQuestionIndex(bare, 1, [q("A")]), -1);
+	// 追加不影响
+	assert.equal(remapQuestionIndex(bare, 0, [...bare, q("A")]), 0);
+});
+
+test("occurrenceOf counts earlier questions with the same normalized text", () => {
+	const qs = [{ text: "Same" }, { text: "other" }, { text: " same " }];
+	assert.equal(occurrenceOf(qs, 0), 0);
+	assert.equal(occurrenceOf(qs, 2), 1);
 });
