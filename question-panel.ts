@@ -2,21 +2,24 @@
  * question-panel.ts
  *
  * `/questions [宽度]` — 打开/关闭「用户提问列表」浮动面板（停靠右上角）：
- *   - 列出当前会话分支上的所有用户提问（序号 + 时间 + 摘要）
- *   - 鼠标点击条目 → transcript 滚动到该提问处；滚轮翻动列表；顶部 [ 关闭 ] 关闭
- *   - 键盘备用路径：↑↓ 选择、回车跳转、q/Esc 关闭
+ *   - 列出当前 transcript 中可见的用户提问（序号 + 摘要；压缩感知）
+ *   - 鼠标点击条目 → transcript 滚动到该提问处；回合分析详情区可用滚轮滚动
+ *   - 键盘：↑↓ 选择、回车跳转（作用于当前高亮项，鼠标悬停优先）、Esc 关闭
+ *   - 鼠标悬停只做高亮预览：↑↓ 会清除悬停，保证回车目标与看到的高亮一致
  *   - 宽度：默认 60%；/questions 50（列数）或 /questions 60%（百分比）调整，会话内记忆；
  *     面板打开时带参数会以新宽度重开
  *
  * 实现说明：
  *   - 面板本体走公开 API：ctx.ui.custom(overlay) + Component.handleMouse（pi-tui）。
+ *   - 数据：pi 的 transcript 只渲染 sessionManager.buildContextEntries()（压缩后的活动上下文），
+ *     因此列表与标记序号都基于它（不可用时本地按 compaction 规则兜底），否则压缩后序号会漂移。
+ *     无可渲染文本的用户消息（纯图片/空消息）不会产生组件与 OSC 标记，直接排除。
  *   - 跳转：pi 未公开暴露 transcript 组件，这里对 TUI 内部布局对象做运行时特征检测：
  *     currentLayout → 含 scrollContentLines 的 box → ScrollView.scrollTo(row)。
- *     行定位利用 transcript 的 OSC 133;A 标记（UserMessageComponent 与无工具调用的
+ *     首选行定位利用 transcript 的 OSC 133;A 标记（UserMessageComponent 与无工具调用的
  *     AssistantMessageComponent 首行都会写入，与内置 previousPrompt/nextPrompt 跳转同源）。
- *     因此点击第 k 条提问时，按分支数据推算它在标记序列中的序号：
- *       user 消息 → 必产生一个标记；assistant 消息 → 仅在没有 toolCall part 时产生标记。
- *     pi 升级若改动这些内部字段/渲染规则，仅跳转失效（面板与提示降级），不影响其他功能。
+ *     标记法失败时退回文本匹配：遍历 transcript 组件树找 UserMessageComponent，
+ *     比较归一化文本 + 渲染首行在文档中的出现序（不再依赖标记规则）。
  */
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
@@ -32,50 +35,59 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import {
+	activeContextEntries,
+	buildTurnFromEntries,
+	collectQuestionsFromEntries,
+	firstLine,
+	markerOrdinalFromEntries,
+	normalizeMatchText,
+	type QuestionItem,
+	type SessionEntryLike,
+	type TurnData,
+	type TurnNode,
+} from "./question-logic";
+
+// 对外保持原有导出（类型从 question-logic 重导出）
+export type { QuestionItem, TurnData, TurnNode } from "./question-logic";
 
 // ---------------------------------------------------------------------------
-// 数据：从会话分支收集用户提问
+// 数据：活动上下文（压缩感知）→ 提问列表 / 标记序号 / 回合分析
 // ---------------------------------------------------------------------------
 
-interface QuestionItem {
-	/** 分支顺序号（第几条用户提问，从 0 开始），同时是标记序号推算的输入 */
-	index: number;
-	/** 首行摘要 */
-	summary: string;
-	/** HH:MM */
-	time: string;
-}
-
-/** 提取 user 消息文本（content 可能是 string 或 parts 数组）。 */
-function extractUserText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (Array.isArray(content)) {
-		const parts: string[] = [];
-		for (const part of content) {
-			if (part && typeof part === "object" && (part as { type?: string }).type === "text") {
-				const t = (part as { text?: string }).text;
-				if (typeof t === "string") parts.push(t);
-			}
-		}
-		return parts.join("\n");
+/**
+ * 当前 transcript 实际渲染的条目。
+ * pi 只渲染 buildContextEntries() 的结果；被压缩掉的旧消息不在屏幕上，
+ * 若仍按 getBranch() 统计，序号会从压缩点开始整体偏移（跳错位置）。
+ */
+function activeEntries(ctx: ExtensionCommandContext): SessionEntryLike[] {
+	try {
+		const entries = ctx.sessionManager.buildContextEntries();
+		if (Array.isArray(entries)) return entries as SessionEntryLike[];
+	} catch {
+		// 旧版 pi / 异常状态：退回当前分支 + 本地压缩过滤
 	}
-	return "";
+	return activeContextEntries(ctx.sessionManager.getBranch() as SessionEntryLike[]);
 }
 
-function formatTime(ts: unknown): string {
-	const n = typeof ts === "number" ? ts : Number(ts);
-	if (!Number.isFinite(n) || n <= 0) return "--:--";
-	const d = new Date(n);
-	const p = (v: number) => String(v).padStart(2, "0");
-	return `${p(d.getHours())}:${p(d.getMinutes())}`;
+export function collectQuestions(ctx: ExtensionCommandContext): QuestionItem[] {
+	return collectQuestionsFromEntries(activeEntries(ctx));
 }
 
-function firstLine(text: string): string {
-	for (const line of text.split("\n")) {
-		const t = line.trim();
-		if (t) return t;
-	}
-	return "";
+/**
+ * 推算「第 target 条可跳转提问」在 transcript OSC 133;A 标记序列中的序号（0 起）。
+ * 标记产生规则（UserMessageComponent / AssistantMessageComponent）：
+ *   - user 消息：有文本（会渲染组件）时恰好一个标记；无文本则没有
+ *   - assistant 消息：content 无 toolCall part（即纯文本回复）时一个标记
+ *   - 其他 role（toolResult/custom/bashExecution/…）：不产生标记
+ */
+export function markerOrdinalForQuestion(ctx: ExtensionCommandContext, target: number): number | null {
+	return markerOrdinalFromEntries(activeEntries(ctx), target);
+}
+
+/** 构建第 ordinal 条提问（0 起）的回合分析数据。找不到提问时返回 null。 */
+export function buildTurn(ctx: ExtensionCommandContext, ordinal: number): TurnData | null {
+	return buildTurnFromEntries(activeEntries(ctx), ordinal);
 }
 
 /** 工具参数摘要（单行、限宽） */
@@ -90,169 +102,6 @@ function briefArgs(v: unknown, max = 36): string {
 	return s ? truncateToWidth(s, max, "…") : "{}";
 }
 
-export function collectQuestions(ctx: ExtensionCommandContext): QuestionItem[] {
-	const out: QuestionItem[] = [];
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if ((entry as { type?: string }).type !== "message") continue;
-		const msg = (entry as { message?: { role?: string; content?: unknown; timestamp?: unknown } }).message;
-		if (!msg || msg.role !== "user") continue;
-		const text = extractUserText(msg.content).trim();
-		out.push({
-			index: out.length,
-			summary: text ? firstLine(text) : "[图片]",
-			time: formatTime(msg.timestamp),
-		});
-	}
-	return out;
-}
-
-/**
- * 推算「第 target 条用户提问」在 transcript OSC 133;A 标记序列中的序号（0 起）。
- * 标记产生规则（UserMessageComponent / AssistantMessageComponent）：
- *   - user 消息：每条恰好一个标记
- *   - assistant 消息：content 无 toolCall part（即纯文本回复）时一个标记
- *   - 其他 role（toolResult/custom/bashExecution/…）：不产生标记
- */
-export function markerOrdinalForQuestion(ctx: ExtensionCommandContext, target: number): number | null {
-	let markerOrdinal = 0;
-	let questionOrdinal = 0;
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if ((entry as { type?: string }).type !== "message") continue;
-		const msg = (entry as { message?: { role?: string; content?: unknown } }).message;
-		if (!msg) continue;
-
-		if (msg.role === "user") {
-			if (questionOrdinal === target) return markerOrdinal;
-			questionOrdinal++;
-			markerOrdinal++;
-			continue;
-		}
-
-		if (msg.role === "assistant") {
-			const parts = Array.isArray(msg.content) ? msg.content : [];
-			const hasToolCall = parts.some(
-				(p) => p && typeof p === "object" && (p as { type?: string }).type === "toolCall",
-			);
-			if (!hasToolCall) markerOrdinal++;
-		}
-	}
-	return null;
-}
-
-// ---------------------------------------------------------------------------
-// 数据：回合分析（一次提问到下一次提问之间的节点链）
-// ---------------------------------------------------------------------------
-
-export type TurnNode =
-	| { kind: "thinking"; id: number; text: string }
-	| { kind: "text"; id: number; text: string; isFinal: boolean }
-	| {
-				kind: "tool";
-				id: number;
-				name: string;
-				args: unknown;
-				result: string | null;
-				isError: boolean;
-	  };
-
-export interface TurnData {
-	question: QuestionItem;
-	/** 思考→工具→…→输出 的线性节点链 */
-	nodes: TurnNode[];
-}
-
-function partText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	const parts: string[] = [];
-	for (const part of content) {
-		if (part && typeof part === "object" && (part as { type?: string }).type === "text") {
-			const t = (part as { text?: string }).text;
-			if (typeof t === "string") parts.push(t);
-		}
-	}
-	return parts.join("\n");
-}
-
-/** 构建第 ordinal 条提问（0 起）的回合分析数据。找不到提问时返回 null。 */
-export function buildTurn(ctx: ExtensionCommandContext, ordinal: number): TurnData | null {
-	let questionOrdinal = 0;
-	let question: QuestionItem | null = null;
-	const nodes: TurnNode[] = [];
-	const pendingTools = new Map<string, TurnNode & { kind: "tool" }>();
-
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if ((entry as { type?: string }).type !== "message") continue;
-		const msg = (entry as { message?: { role?: string; content?: unknown } }).message;
-		if (!msg) continue;
-
-		// 到达下一条用户提问：回合结束
-		if (msg.role === "user") {
-			if (question) break;
-			if (questionOrdinal === ordinal) {
-				question = { index: ordinal, summary: firstLine(extractUserText(msg.content)) || "[图片]", time: "" };
-		}
-			questionOrdinal++;
-			continue;
-		}
-		if (!question) continue;
-
-		if (msg.role === "assistant") {
-			const parts = Array.isArray(msg.content) ? msg.content : [];
-			for (const part of parts) {
-				const p = part as { type?: string };
-				if (p.type === "thinking") {
-					const t = (part as { thinking?: string }).thinking ?? "";
-					nodes.push({ kind: "thinking", id: nodes.length, text: t });
-				} else if (p.type === "toolCall") {
-					const tc = part as { id?: string; name?: string; arguments?: unknown };
-					const node: TurnNode & { kind: "tool" } = {
-						kind: "tool",
-						id: nodes.length,
-						name: tc.name ?? "(unknown)",
-						args: tc.arguments,
-						result: null,
-						isError: false,
-					};
-					nodes.push(node);
-					if (tc.id) pendingTools.set(tc.id, node);
-				} else if (p.type === "text") {
-					const t = ((part as { text?: string }).text ?? "").trim();
-					if (t) nodes.push({ kind: "text", id: nodes.length, text: t, isFinal: false });
-				}
-			}
-		} else if (msg.role === "toolResult") {
-			const tr = msg as { toolCallId?: string; content?: unknown; isError?: boolean };
-			const node = tr.toolCallId ? pendingTools.get(tr.toolCallId) : undefined;
-			if (node) {
-				node.result = partText(tr.content).trim() || "(空)";
-				node.isError = tr.isError === true;
-				pendingTools.delete(tr.toolCallId!);
-			}
-		} else if (msg.role === "bashExecution") {
-			const b = msg as { command?: string; output?: string; exitCode?: number };
-			nodes.push({
-					kind: "tool",
-					id: nodes.length,
-					name: "!bash",
-					args: b.command ?? "",
-					result: (b.output ?? "").trim() || "(空)",
-					isError: b.exitCode !== undefined && b.exitCode !== 0,
-			});
-		}
-	}
-
-	if (!question) return null;
-	// 回合内最后一个文本节点标记为「输出」
-	for (let i = nodes.length - 1; i >= 0; i--) {
-		if (nodes[i].kind === "text") {
-				(nodes[i] as { isFinal: boolean }).isFinal = true;
-				break;
-			}
-	}
-	return { question, nodes };
-}
-
 // ---------------------------------------------------------------------------
 // 跳转：运行时特征检测 pi 内部布局（失败优雅降级）
 // ---------------------------------------------------------------------------
@@ -262,6 +111,9 @@ const OSC133_A = /^\x1b\]133;A/;
 
 interface ScrollViewLike {
 	scrollTo(row: number, opts?: { disableFollow?: boolean }): void;
+	/** ScrollView 的唯一子组件（transcript 文档根） */
+	child?: unknown;
+	getContentWidth?(width: number): number;
 }
 interface LayoutBoxLike {
 	scrollView?: unknown;
@@ -325,6 +177,91 @@ export function jumpToMarker(tui: TUI, ordinal: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// 跳转兜底：文本匹配（pi 改动标记规则时仍可用）
+// ---------------------------------------------------------------------------
+
+interface TextualComponent {
+	text?: unknown;
+	rebuild?: unknown;
+	child?: unknown;
+	children?: unknown[];
+	render?(width: number): string[];
+}
+
+/** 递归遍历组件树（children + 单 child），带环检测。 */
+function walkComponents(root: unknown, out: TextualComponent[] = [], seen = new Set<unknown>()): TextualComponent[] {
+	if (!root || typeof root !== "object" || seen.has(root)) return out;
+	seen.add(root);
+	const component = root as TextualComponent;
+	out.push(component);
+	if (Array.isArray(component.children)) {
+		for (const child of component.children) walkComponents(child, out, seen);
+	}
+	if (component.child && component.child !== root) walkComponents(component.child, out, seen);
+	return out;
+}
+
+/** UserMessageComponent 的特征：原始 text + rebuild() + render()。 */
+function isUserMessageComponent(c: TextualComponent): boolean {
+	return typeof c.text === "string" && typeof c.rebuild === "function" && typeof c.render === "function";
+}
+
+const CSI_SEQ = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const OSC133_SEQ = /\x1b\]133;[ABC](?:\x07|\x1b\\)/g;
+
+/** 剥颜色/光标等序列、以及 OSC 133 区域标记，只用于行内容比较。 */
+function stripLineAnsi(line: string): string {
+	return line.replace(CSI_SEQ, "").replace(OSC133_SEQ, "");
+}
+
+/**
+ * 文本匹配兜底：在 transcript 组件树里找第 occurrence 个文本相同的 UserMessageComponent，
+ * 再用它渲染后的首行在文档中的出现序定位行号。
+ *
+ * occurrence = 目标提问之前、文本归一化后相同的提问数量（由调用方按 collectQuestions 计算）。
+ */
+export function jumpToQuestionText(tui: TUI, questionText: string, occurrence: number): boolean {
+	const found = findTranscript(tui);
+	if (!found) return false;
+	const scrollView = found.scrollView;
+	const doc = scrollView.child;
+	if (!doc) return false;
+
+	const users = walkComponents(doc).filter(isUserMessageComponent);
+	const targetNorm = normalizeMatchText(questionText);
+	const matches = users.filter((c) => normalizeMatchText(c.text as string) === targetNorm);
+	const target = matches[occurrence];
+	if (!target) return false;
+
+	const columns = tui.terminal?.columns ?? 80;
+	const width = Math.max(1, scrollView.getContentWidth?.(columns) ?? columns);
+	const anchor = (target.render?.(width) ?? [])
+		.map(stripLineAnsi)
+		.find((line) => line.trim().length > 0);
+	if (!anchor) return false;
+
+	// 同一条首行可能重复，统计目标之前所有用户组件中该行的总出现次数
+	const countAnchor = (lines: readonly string[]): number =>
+		lines.reduce((count, line) => count + (stripLineAnsi(line) === anchor ? 1 : 0), 0);
+	let sameBefore = 0;
+	for (const component of users) {
+		if (component === target) break;
+		sameBefore += countAnchor(component.render?.(width) ?? []);
+	}
+
+	let seen = 0;
+	for (let row = 0; row < found.lines.length; row++) {
+		if (stripLineAnsi(found.lines[row] ?? "") !== anchor) continue;
+		if (seen++ !== sameBefore) continue;
+		// 目标行上方留一行上下文
+		scrollView.scrollTo(Math.max(0, row - 1), { disableFollow: true });
+		(tui as unknown as TuiInternals).requestRender?.();
+		return true;
+	}
+	return false;
+}
+
+// ---------------------------------------------------------------------------
 // 面板组件
 // ---------------------------------------------------------------------------
 
@@ -343,7 +280,7 @@ export class QuestionPanelComponent implements Component {
 	private readonly turnLoader: (ordinal: number) => TurnData | null;
 
 	private selected = 0;
-	/** 鼠标悬停的条目序号；-1 表示悬停在关闭按钮上；null 表示无 */
+	/** 鼠标悬停的条目序号；null 表示无 */
 	private hover: number | null = null;
 	/** 列表滚动偏移（条目数） */
 	private offset = 0;
@@ -362,11 +299,7 @@ export class QuestionPanelComponent implements Component {
 
 	// render 时记录的命中区域
 	private itemYs: number[] = [];
-	private closeStart = 0;
-	private closeEnd = 0;
 	private nodeYs: number[] = [];
-	private backStart = 0;
-	private backEnd = 0;
 	/** 详情内容行范围（含端点） */
 	private detailTop = -1;
 	private detailBottom = -1;
@@ -463,6 +396,7 @@ export class QuestionPanelComponent implements Component {
 		this.nodeSel = 0;
 		this.treeOffset = 0;
 		this.detailOffset = 0;
+		this.hover = null;
 		this.hoverNode = null;
 		this.bump();
 	}
@@ -471,25 +405,25 @@ export class QuestionPanelComponent implements Component {
 		this.view = "list";
 		this.turn = null;
 		this.mdCache = null;
+		this.hover = null;
+		this.hoverNode = null;
 		this.bump();
 	}
 
 	handleInput(data: string): boolean {
-		if (data === "q" || data === "Q") {
-			this.close();
-			return true;
-		}
-
 		if (this.view === "turn") {
 			if (matchesKey(data, "escape") || matchesKey(data, "left")) {
 				this.backToList();
 				return true;
 			}
 			if (matchesKey(data, "up")) {
+				// 键盘导航时清除鼠标悬停，否则悬停项会盖住键盘选中项（看起来像没反应）
+				this.hoverNode = null;
 				this.selectNode(this.nodeSel - 1);
 				return true;
 			}
 			if (matchesKey(data, "down")) {
+				this.hoverNode = null;
 				this.selectNode(this.nodeSel + 1);
 				return true;
 			}
@@ -515,6 +449,8 @@ export class QuestionPanelComponent implements Component {
 			return true;
 		}
 		if (matchesKey(data, "up")) {
+			// 键盘导航时清除鼠标悬停，否则悬停项会盖住键盘选中项（看起来像没反应）
+			this.hover = null;
 			if (this.selected > 0) {
 				this.selected--;
 				this.ensureSelectedVisible();
@@ -523,6 +459,7 @@ export class QuestionPanelComponent implements Component {
 			return true;
 		}
 		if (matchesKey(data, "down")) {
+			this.hover = null;
 			if (this.selected < this.items.length - 1) {
 				this.selected++;
 				this.ensureSelectedVisible();
@@ -531,7 +468,8 @@ export class QuestionPanelComponent implements Component {
 			return true;
 		}
 		if (matchesKey(data, "return") || data === " ") {
-			this.jumpTo(this.selected);
+			// 回车/空格：与点击一致，作用于当前高亮项（悬停优先于键盘选中）
+			this.jumpTo(this.hover !== null ? this.hover : this.selected);
 			return true;
 		}
 		if (data === "d" || data === "D" || matchesKey(data, "right")) {
@@ -539,14 +477,6 @@ export class QuestionPanelComponent implements Component {
 			return true;
 		}
 		return true;
-	}
-
-	private inBack(event: TuiMouseEvent): boolean {
-		return event.y === 0 && event.x >= this.backStart && event.x < this.backEnd;
-	}
-
-	private inClose(event: TuiMouseEvent): boolean {
-		return event.y === 0 && event.x >= this.closeStart && event.x < this.closeEnd;
 	}
 
 	private nodeAt(y: number): number {
@@ -559,18 +489,16 @@ export class QuestionPanelComponent implements Component {
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (event.type === "move") {
 			if (this.view === "turn") {
-				const next = this.inBack(event)
-					? -2
-					: this.inClose(event)
-						? -1
-						: this.nodeAt(event.y);
+				const pos = this.nodeAt(event.y);
+				const next = pos >= 0 ? pos : null;
 				if (next !== this.hoverNode) {
 					this.hoverNode = next;
 					this.bump();
 				}
 				return { handled: true, render: false };
 			}
-			const next = this.inClose(event) ? -1 : this.itemAt(event.y);
+			const pos = this.itemAt(event.y);
+			const next = pos >= 0 ? pos : null;
 			if (next !== this.hover) {
 				this.hover = next;
 				this.bump();
@@ -578,43 +506,20 @@ export class QuestionPanelComponent implements Component {
 			return { handled: true, render: false };
 		}
 
-		if (event.type === "wheel") {
-			// wheelDelta 为负 = 向上滚
-			const step = Math.max(-3, Math.min(3, event.wheelDelta ?? -1));
-			if (this.view === "turn") {
-				if (event.y >= this.detailTop && event.y <= this.detailBottom) {
-					// 详情区滚动（逐行）
+		if (event.type === "wheel" && this.view === "turn") {
+			// 仅保留回合分析详情区的滚轮滚动（列表与节点树不响应滚轮）
+			if (event.y >= this.detailTop && event.y <= this.detailBottom) {
+				const step = Math.max(-3, Math.min(3, event.wheelDelta ?? -1));
+				if (step !== 0) {
 					this.detailOffset = Math.max(0, this.detailOffset + step);
 					this.bump();
-				} else {
-					const total = this.visibleNodes().length;
-					const view = Math.min(total, TREE_VISIBLE_ROWS);
-					const next = Math.max(0, Math.min(Math.max(0, total - view), this.treeOffset + step));
-					if (next !== this.treeOffset) {
-							this.treeOffset = next;
-						this.bump();
-					}
 				}
-				return { handled: true, render: true };
-			}
-			const next = Math.max(0, Math.min(this.maxOffset(), this.offset + step));
-			if (next !== this.offset) {
-				this.offset = next;
-				this.bump();
 			}
 			return { handled: true, render: true };
 		}
 
 		if (event.type === "click" && event.button === "left") {
-			if (this.inClose(event)) {
-				this.close();
-				return { handled: true };
-			}
 			if (this.view === "turn") {
-				if (this.inBack(event)) {
-					this.backToList();
-					return { handled: true };
-				}
 				const pos = this.nodeAt(event.y);
 				if (pos >= 0) this.selectNode(pos);
 				return { handled: true, render: false };
@@ -662,20 +567,11 @@ export class QuestionPanelComponent implements Component {
 			return "│" + truncateToWidth(padded, innerW, "") + "│";
 		};
 
-		// 顶边框：┌─ 提问列表（N）─── [ 关闭 ]──┐
-		const closeLabel = " [ 关闭 ] ";
+		// 顶边框：┌─ 提问列表（N）──────┐
 		const titleSeg = "─" + theme.fg("accent", theme.bold(` 提问列表（${this.items.length}）`)) + "─";
-		const fill = Math.max(0, width - 2 - visibleWidth(titleSeg) - (visibleWidth(closeLabel) + 2));
-		const closeStyled =
-			this.hover === -1
-				? theme.style(closeLabel, { fg: "accent", bold: true })
-				: theme.fg("muted", closeLabel);
-		const top =
-			"┌" + titleSeg + theme.fg("dim", "─".repeat(fill)) + "─" + closeStyled + "─" + "┐";
+		const fill = Math.max(0, width - 2 - visibleWidth(titleSeg));
+		const top = "┌" + titleSeg + theme.fg("dim", "─".repeat(fill)) + "┐";
 		lines.push(truncateToWidth(top, width, ""));
-		// 极窄宽度下关闭按钮可能被截断：命中区域随之收敛，避免越界
-		this.closeStart = Math.min(this.closeStart, Math.max(0, width - visibleWidth(closeLabel)));
-		this.closeEnd = Math.min(this.closeStart + visibleWidth(closeLabel), width);
 
 		// 条目行
 		const count = this.visibleCount();
@@ -686,7 +582,7 @@ export class QuestionPanelComponent implements Component {
 			const active = this.hover === idx || (this.hover === null && this.selected === idx);
 			const marker = active ? "> " : "  ";
 			const num = String(idx + 1).padStart(2, " ");
-			const body = truncateToWidth(`${marker}${num} ${item.time}  ${item.summary}`, innerW, "…");
+			const body = truncateToWidth(`${marker}${num} ${item.summary}`, innerW, "…");
 			lines.push(boxLine(active ? theme.style(body, { fg: "accent", bold: true }) : body));
 			this.itemYs[idx] = lines.length - 1;
 		}
@@ -697,7 +593,7 @@ export class QuestionPanelComponent implements Component {
 			this.maxOffset() > 0
 				? `（${this.offset + 1}-${Math.min(this.items.length, this.offset + count)}/${this.items.length}）`
 				: "";
-		const hint = ` 回车/点击 跳转 · 双击/d 分析 · ↑↓ 选择 · 滚轮 翻动${range} · q/Esc 关闭 `;
+		const hint = ` 回车/点击 跳转 · 双击/d 分析 · ↑↓ 选择${range} · Esc 关闭 `;
 		lines.push(boxLine(theme.fg("dim", truncateToWidth(hint, innerW, "…"))));
 		lines.push("└" + "─".repeat(innerW) + "┘");
 
@@ -718,33 +614,12 @@ export class QuestionPanelComponent implements Component {
 			return "│" + truncateToWidth(padded, innerW, "") + "│";
 		};
 
-		// 顶边框：┌─ 回合分析 · 第N问 ── [ 返回 ]─[ 关闭 ]─┐
-		const backLabel = " [ 返回 ] ";
-		const closeLabel = " [ 关闭 ] ";
+		// 顶边框：┌─ 回合分析 · 第N问 ────┐
 		const titleSeg =
 			"─" + theme.fg("accent", theme.bold(` 回合分析 · 第${turn.question.index + 1}问 `)) + "─";
-		const fill = Math.max(
-				0,
-				width - 2 - visibleWidth(titleSeg) - (visibleWidth(backLabel) + 1) - (visibleWidth(closeLabel) + 1),
-		);
-		const btn = (label: string, active: boolean): string =>
-			active ? theme.style(label, { fg: "accent", bold: true }) : theme.fg("muted", label);
-		const top =
-			"┌" +
-			titleSeg +
-			theme.fg("dim", "─".repeat(fill)) +
-			"─" +
-			btn(backLabel, this.hoverNode === -2) +
-			"─" +
-			btn(closeLabel, this.hoverNode === -1) +
-			"┐";
+		const fill = Math.max(0, width - 2 - visibleWidth(titleSeg));
+		const top = "┌" + titleSeg + theme.fg("dim", "─".repeat(fill)) + "┐";
 		lines.push(truncateToWidth(top, width, ""));
-		let col = 1 + visibleWidth(titleSeg) + fill + 1;
-		this.backStart = col;
-		this.backEnd = Math.min(col + visibleWidth(backLabel), width);
-		col = this.backEnd + 1;
-		this.closeStart = Math.min(col, Math.max(0, width - visibleWidth(closeLabel)));
-		this.closeEnd = Math.min(this.closeStart + visibleWidth(closeLabel), width);
 
 		// 提问行
 		lines.push(boxLine(theme.fg("dim", truncateToWidth(` 问  ${turn.question.summary}`, innerW, "…"))));
@@ -821,7 +696,7 @@ export class QuestionPanelComponent implements Component {
 
 		// 底部提示 + 底边框
 		lines.push("├" + "─".repeat(innerW) + "┤");
-		const hint = ` ↑↓ 节点 · 回车 定位提问 · t 仅思维链(${this.chainOnly ? "开" : "关"}) · ←/Esc 返回 · 滚轮 滚动 · q 关闭 `;
+		const hint = ` ↑↓ 节点 · 回车 定位提问 · t 仅思维链(${this.chainOnly ? "开" : "关"}) · ←/Esc 返回 · 滚轮 详情 `;
 		lines.push(boxLine(theme.fg("dim", truncateToWidth(hint, innerW, "…"))));
 		lines.push("└" + "─".repeat(innerW) + "┘");
 
@@ -852,7 +727,7 @@ export class QuestionPanelComponent implements Component {
 				if (!this.mdCache || this.mdCache.key !== key || this.mdCache.theme !== mdTheme) {
 					this.mdCache = { key, theme: mdTheme, md: new Markdown(node.text, 0, 0, mdTheme) };
 				}
-				return this.mdCache.md.render(dw);
+				return [...this.mdCache.md.render(dw)];
 			} catch {
 				return wrap(node.text);
 			}
@@ -945,8 +820,15 @@ export default function (pi: ExtensionAPI) {
 						theme,
 						questions,
 						(index) => {
-							const ordinal = markerOrdinalForQuestion(ctx, questions[index]!.index);
-							if (ordinal === null || !jumpToMarker(tui, ordinal)) {
+							const item = questions[index]!;
+							const ordinal = markerOrdinalForQuestion(ctx, item.index);
+							if (ordinal !== null && jumpToMarker(tui, ordinal)) return;
+							// 标记法失效（例如 pi 调整了 OSC 133;A 规则）→ 文本匹配兜底
+							const normalized = normalizeMatchText(item.text);
+							const occurrence = questions
+								.slice(0, index)
+								.filter((q) => normalizeMatchText(q.text) === normalized).length;
+							if (!jumpToQuestionText(tui, item.text, occurrence)) {
 								ctx.ui.notify("跳转失败：无法定位 transcript（pi 内部结构可能已变化）", "warning");
 							}
 						},

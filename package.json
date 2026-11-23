@@ -20,9 +20,13 @@
 	"files": [
 		"index.ts",
 		"question-panel.ts",
+		"question-logic.ts",
 		"README.md",
 		"LICENSE"
 	],
+	"scripts": {
+		"test": "node --test"
+	},
 	"pi": {
 		"extensions": [
 			"./index.ts"
