@@ -1,0 +1,14 @@
+# 依赖：不写结尾斜杠，好让软链到 pi 安装目录的 node_modules 也被忽略
+node_modules
+*.log
+.env*
+.DS_Store
+
+# pi 本地目录（任务状态、本地配置）不入库
+.pi
+
+# 设计/计划文档仅本地维护，不入库
+docs/
+
+# 项目进度文档仅本地维护，不入库
+ROADMAP.md

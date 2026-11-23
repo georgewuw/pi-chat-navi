@@ -1,0 +1,43 @@
+{
+	"name": "pi-chat-navi",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "pi coding agent extension：TUI 提问跳转面板（/questions）",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/georgewuw/pi-chat-navi.git"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"pi-coding-agent",
+		"tui"
+	],
+	"engines": {
+		"node": ">=22.19"
+	},
+	"files": [
+		"index.ts",
+		"question-panel.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"peerDependenciesMeta": {
+		"@earendil-works/pi-coding-agent": {
+			"optional": true
+		},
+		"@earendil-works/pi-tui": {
+			"optional": true
+		}
+	}
+}
