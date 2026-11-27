@@ -1,6 +1,6 @@
 {
 	"name": "@georgewuw/pi-chat-navi",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"type": "module",
 	"packageManager": "pnpm@12.15.0",
 	"description": "pi coding agent extension：TUI 提问跳转面板（/questions）",
