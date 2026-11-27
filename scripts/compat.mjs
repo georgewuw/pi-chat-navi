@@ -1,5 +1,5 @@
 /**
- * 兼容性矩阵：用指定版本的 pi 包跑 test/contract.test.mjs。
+ * 兼容性矩阵：用指定版本的 pi 包跑 test/contract.test.ts。
  *
  *   pnpm run test:compat                     # 测 latest
  *   pnpm run test:compat -- 1.6.0 latest     # 测多个版本（npm 上发布的版本号或 dist-tag）
@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CONTRACT_TEST = join("test", "contract.test.mjs");
+const CONTRACT_TEST = join("test", "contract.test.ts");
 const PACKAGES = ["@earendil-works/pi-tui", "@earendil-works/pi-coding-agent"];
 const IS_WINDOWS = process.platform === "win32";
 const PACKAGE_MANAGER = IS_WINDOWS ? "pnpm.cmd" : "pnpm";

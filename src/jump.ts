@@ -3,7 +3,7 @@
  *
  * 跳转：把 transcript 滚动到某条用户提问。
  * 本仓库里所有依赖 pi TUI 内部实现的代码都集中在这个文件；pi 升级后跳转失效，只需要查这里。
- * test/contract.test.mjs 用真实的 pi 包验证这里的全部假设。
+ * test/contract.test.ts 用真实的 pi 包验证这里的全部假设。
  *
  * pi 未公开暴露 transcript 组件，这里对 TUI 内部布局对象做运行时特征检测：
  *   currentLayout → 含 scrollContentLines 的 box → ScrollView.scrollTo(row)。

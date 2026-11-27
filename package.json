@@ -1,6 +1,6 @@
 {
 	"name": "@georgewuw/pi-chat-navi",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"type": "module",
 	"packageManager": "pnpm@12.15.0",
 	"description": "pi coding agent extension：TUI 提问跳转面板（/questions）",
@@ -34,7 +34,7 @@
 	"scripts": {
 		"typecheck": "tsc -p .",
 		"test:compat": "node scripts/compat.mjs",
-		"test": "node --test test/logic.test.mjs test/contract.test.mjs",
+		"test": "node --test test/logic.test.ts test/contract.test.ts",
 		"check": "pnpm run typecheck && pnpm test",
 		"prepublishOnly": "pnpm run check"
 	},

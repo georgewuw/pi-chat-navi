@@ -9,21 +9,34 @@ import {
 	normalizeMatchText,
 	occurrenceOf,
 	remapQuestionIndex,
+	type QuestionItem,
+	type SessionEntryLike,
+	type TurnNode,
 } from "../src/logic.ts";
 
-const text = (value) => [{ type: "text", text: value }];
-const user = (id, content, timestamp = 42) => ({
+/** 会话 content 里的一个 part。测试只关心 type/text，其余字段按需带上。 */
+type Part = { type: string; text?: string; [field: string]: unknown };
+
+const text = (value: string): Part[] => [{ type: "text", text: value }];
+const user = (id: string, content: string | Part[], timestamp = 42): SessionEntryLike => ({
 	id,
 	type: "message",
 	message: { role: "user", content: typeof content === "string" ? text(content) : content, timestamp },
 });
-const assistant = (id, content, timestamp = 42) => ({
+const assistant = (id: string, content: Part[], timestamp = 42): SessionEntryLike => ({
 	id,
 	type: "message",
 	message: { role: "assistant", content, timestamp },
 });
-const toolCall = (id = "t1") => ({ type: "toolCall", id, name: "read", arguments: {} });
-const compaction = (id, firstKeptEntryId) => ({ id, type: "compaction", firstKeptEntryId, summary: "s" });
+const toolCall = (id = "t1"): Part => ({ type: "toolCall", id, name: "read", arguments: {} });
+const compaction = (id: string, firstKeptEntryId: string): SessionEntryLike => ({ id, type: "compaction", firstKeptEntryId, summary: "s" });
+
+/** 取某个节点并收窄类型（assert 不会让 TS 收窄联合类型）。 */
+function nodeOf<K extends TurnNode["kind"]>(node: TurnNode | undefined, kind: K): Extract<TurnNode, { kind: K }> {
+	assert.ok(node, "节点不存在");
+	assert.equal(node.kind, kind);
+	return node as Extract<TurnNode, { kind: K }>;
+}
 
 test("no compaction: active context keeps branch order", () => {
 	const branch = [user("u1", "hello"), assistant("a1", text("hi")), user("u2", "bye")];
@@ -63,7 +76,7 @@ test("compaction with missing firstKeptEntryId keeps only compaction + post entr
 test("textless user messages (image-only/empty) are excluded and produce no marker", () => {
 	const branch = [
 		user("img", [{ type: "image", data: "abc" }]),
-		user("empty", [""]),
+		user("empty", text("")),
 		user("q1", "first"),
 		assistant("a1", [toolCall()]),
 		user("q2", "second"),
@@ -91,8 +104,16 @@ test("buildTurn works on the active context and skips textless user messages", (
 		assistant("oldA", text("old reply")),
 		compaction("c1", "kept"),
 		user("kept", "kept question"),
-		assistant("a1", [{ type: "thinking", thinking: "hmm" }, { type: "toolCall", id: "t1", name: "read", arguments: { path: "a" } }, { type: "text", text: "partial" }]),
-		{ id: "r1", type: "message", message: { role: "toolResult", toolCallId: "t1", content: text("ok"), isError: false } },
+		assistant("a1", [
+			{ type: "thinking", thinking: "hmm" },
+			{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a" } },
+			{ type: "text", text: "partial" },
+		]),
+		{
+			id: "r1",
+			type: "message",
+			message: { role: "toolResult", toolCallId: "t1", content: text("ok"), isError: false },
+		},
 		user("img", [{ type: "image", data: "x" }]),
 		user("next", "next question"),
 	];
@@ -104,9 +125,10 @@ test("buildTurn works on the active context and skips textless user messages", (
 		turn.nodes.map((n) => n.kind),
 		["thinking", "tool", "text"],
 	);
-	assert.equal(turn.nodes[1].result, "ok");
-	assert.equal(turn.nodes[1].isError, false);
-	assert.equal(turn.nodes[2].isFinal, true);
+	const tool = nodeOf(turn.nodes[1], "tool");
+	assert.equal(tool.result, "ok");
+	assert.equal(tool.isError, false);
+	assert.equal(nodeOf(turn.nodes[2], "text").isFinal, true);
 
 	// 第二个提问是 next（跳过图片消息）
 	const second = buildTurnFromEntries(active, 1);
@@ -121,14 +143,13 @@ test("normalizeMatchText handles whitespace and unicode normalization", () => {
 
 test("extractUserText joins text parts like pi's getUserMessageText (no separator)", () => {
 	assert.equal(extractUserText("raw"), "raw");
-	assert.equal(
-		extractUserText([{ type: "text", text: "a" }, { type: "image" }, { type: "text", text: "b" }]),
-		"ab",
-	);
+	assert.equal(extractUserText([{ type: "text", text: "a" }, { type: "image" }, { type: "text", text: "b" }]), "ab");
 	assert.equal(extractUserText([{ type: "image" }]), "");
+	// 畸形 content（part 不是对象/不是 text）：跳过而不是抛错（参数是 unknown，无需断言类型）
+	assert.equal(extractUserText(["", 42, null, { type: "text" }]), "");
 });
 
-const skillBlock = (extra) =>
+const skillBlock = (extra?: string): string =>
 	`<skill name="review" location="/skills/review/SKILL.md">\nSKILL BODY\n</skill>${extra === undefined ? "" : `\n\n${extra}`}`;
 
 test("skill messages: only the user's extra text is a question; skill-only has no marker", () => {
@@ -151,7 +172,12 @@ test("skill messages: only the user's extra text is a question; skill-only has n
 });
 
 test("remapQuestionIndex finds the same question after compaction or appends", () => {
-	const q = (text, entryId) => ({ index: 0, text, summary: text, ...(entryId ? { entryId } : {}) });
+	const q = (text: string, entryId?: string): QuestionItem => ({
+		index: 0,
+		text,
+		summary: text,
+		...(entryId ? { entryId } : {}),
+	});
 	// 按 entryId：追加和压缩都能精确找回
 	const snapshot = [q("A", "e1"), q("B", "e2"), q("A", "e3")];
 	assert.equal(remapQuestionIndex(snapshot, 2, [...snapshot, q("C", "e4")]), 2);

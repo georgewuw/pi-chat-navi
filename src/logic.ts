@@ -12,11 +12,15 @@
 export interface SessionEntryLike {
 	type?: string;
 	id?: string;
+	/** 压缩条目的保留起点 */
 	firstKeptEntryId?: string;
+	/** 压缩条目的摘要文本（logic.ts 不读，但条目里确实存在） */
+	summary?: string;
 	message?: {
 		role?: string;
 		content?: unknown;
 		stopReason?: string;
+		timestamp?: number;
 		toolCallId?: string;
 		isError?: boolean;
 		command?: string;

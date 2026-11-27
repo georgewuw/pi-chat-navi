@@ -62,7 +62,7 @@ pi -ne -e .       # pi 用 jiti 直接加载 src/index.ts，无需构建
 
 ```
 pnpm install            # 首次需要：契约测试依赖 devDependencies 里的真实 pi 包
-pnpm run typecheck      # tsc 类型检查
+pnpm run typecheck      # tsc 类型检查（含 test/，tsconfig 的 include 覆盖 src 与 test）
 pnpm test               # 逻辑单测 + 契约测试（针对 devDependencies 里装的 pi 版本）
 pnpm run test:compat    # 用 npm 上最新的 pi 版本跑契约测试
 pnpm run test:compat -- 1.6.0 latest   # 指定多个版本
@@ -70,11 +70,15 @@ pnpm run test:compat -- --keep 1.6.0   # 保留临时目录便于排查
 pnpm run test:compat -- --verbose 1.6.0 # 失败时打印完整测试输出
 ```
 
-- `test/logic.test.mjs`：`logic.ts` 的纯函数。
-- `test/contract.test.mjs`：直接用 `node --test` 运行并导入 `src/*.ts`（Node 22 原生类型剥离），不需要先构建。
-  按 pi 的挂载方式搭一段 transcript，验证 `jump.ts` 与 `logic.ts` 对 pi 的假设：布局字段是否存在、
+- `test/logic.test.ts`：`logic.ts` 的纯函数。
+- `test/contract.test.ts`：测试本身也是 TypeScript，用 `node --test` 直接跑（Node 22 原生类型剥离），
+  不依赖 ts-node/tsx，也不需要先构建；同时 `pnpm run typecheck` 会把它们一起检查，
+  所以 fixture 写错字段（例如构造会话条目时拼错 `stopReason`）会在编译期就报错。
+  内容上：按 pi 的挂载方式搭一段 transcript，验证 `jump.ts` 与 `logic.ts` 对 pi 的假设：布局字段是否存在、
   OSC 133;A 标记数量与序号是否与推算一致、标记法和文本匹配兜底是否都落在正确行。
   pi 改了内部实现时，失败信息会指出是哪个字段或规则变了。
+  （几处 `as unknown as` 是故意的：`findTranscript` 只暴露 `jump.ts` 需要的最小接口，测试要读 `ScrollView.scrollTop`
+  和 `TuiAltScreen.currentLayout` 这类内部字段，必须显式放宽类型。）
 - 升级 pi 前后，运行 `pnpm run test:compat`；失败时先看失败信息指出的是哪条假设：跳转相关的改 `src/jump.ts`，
   标记数量/顺序相关（OSC 133;A 由哪些消息写入）的改 `src/logic.ts` 里镜像 pi 渲染规则的部分
   （`assistantWritesMarker`、`renderedUserText`）。
