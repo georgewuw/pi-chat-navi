@@ -1,5 +1,7 @@
 # pi-chat-navi
 
+npm 包：`@georgewuw/pi-chat-navi`
+
 [pi coding agent](https://github.com/earendil-works/pi-coding-agent) 扩展：在 TUI 里用 `/questions` 打开「用户提问列表」浮动面板，用键盘选择后回车即可跳回会话中的任意一次提问。
 
 ## 功能
@@ -11,11 +13,39 @@
 
 ## 安装
 
+从 npm 安装（推荐）：
+
 ```
-pi install <本仓库路径或 git 地址>
+pi install npm:@georgewuw/pi-chat-navi          # 最新版
+pi install npm:@georgewuw/pi-chat-navi@0.1.0    # 固定版本
 ```
 
-开发时直接加载：`pi -ne -e .`（入口为 `package.json` 里 `pi.extensions` 指向的 `src/index.ts`）
+也可以从 git 或本地路径安装：
+
+```
+pi install git:github.com/georgewuw/pi-chat-navi
+pi install ./pi-chat-navi
+```
+
+安装后重启 pi，在会话里输入 `/questions` 即可。
+
+只试用一次、不写入设置：
+
+```
+pi -e npm:@georgewuw/pi-chat-navi
+```
+
+### 本地开发
+
+本仓库使用 pnpm（`package.json` 的 `packageManager` 已固定版本，lockfile 为 `pnpm-lock.yaml`）：
+
+```
+corepack enable   # 首次使用：让 corepack 按 packageManager 准备 pnpm
+pnpm install
+pi -ne -e .       # pi 用 jiti 直接加载 src/index.ts，无需构建
+```
+
+`package.json` 的 `pi.extensions` 指向 `./src/index.ts`；修改 `src/` 后重新加载即可。
 
 ## 代码结构
 
@@ -26,22 +56,26 @@ pi install <本仓库路径或 git 地址>
 | `src/jump.ts` | 跳转。**所有依赖 pi TUI 内部实现的代码都在这里** |
 | `src/panel.ts` | 面板组件：状态、键鼠、渲染。不碰会话数据和 transcript |
 
+入口就是 `src/index.ts`：pi 通过 jiti 直接执行 `.ts`，不需要编译产物。
+
 ## 测试
 
 ```
-npm install           # 首次需要：契约测试依赖 devDependencies 里的真实 pi 包
-npm run typecheck     # tsc 类型检查
-npm test              # 逻辑单测 + 契约测试（针对 devDependencies 里装的 pi 版本）
-npm run test:compat   # 用 npm 上最新的 pi 版本跑契约测试
-npm run test:compat -- 1.6.0 latest   # 指定多个版本
+pnpm install            # 首次需要：契约测试依赖 devDependencies 里的真实 pi 包
+pnpm run typecheck      # tsc 类型检查
+pnpm test               # 逻辑单测 + 契约测试（针对 devDependencies 里装的 pi 版本）
+pnpm run test:compat    # 用 npm 上最新的 pi 版本跑契约测试
+pnpm run test:compat -- 1.6.0 latest   # 指定多个版本
+pnpm run test:compat -- --keep 1.6.0   # 保留临时目录便于排查
+pnpm run test:compat -- --verbose 1.6.0 # 失败时打印完整测试输出
 ```
 
 - `test/logic.test.mjs`：`logic.ts` 的纯函数。
-- `test/contract.test.mjs`：用真实的 `TuiAltScreen`、`ScrollView`、`UserMessageComponent`、`AssistantMessageComponent`
+- `test/contract.test.mjs`：直接用 `node --test` 运行并导入 `src/*.ts`（Node 22 原生类型剥离），不需要先构建。
   按 pi 的挂载方式搭一段 transcript，验证 `jump.ts` 与 `logic.ts` 对 pi 的假设：布局字段是否存在、
   OSC 133;A 标记数量与序号是否与推算一致、标记法和文本匹配兜底是否都落在正确行。
   pi 改了内部实现时，失败信息会指出是哪个字段或规则变了。
-- 升级 pi 前后，运行 `npm run test:compat`；失败时先看失败信息指出的是哪条假设：跳转相关的改 `src/jump.ts`，
+- 升级 pi 前后，运行 `pnpm run test:compat`；失败时先看失败信息指出的是哪条假设：跳转相关的改 `src/jump.ts`，
   标记数量/顺序相关（OSC 133;A 由哪些消息写入）的改 `src/logic.ts` 里镜像 pi 渲染规则的部分
   （`assistantWritesMarker`、`renderedUserText`）。
 - `test:compat` 与 `scripts/` 仅在本仓库内可用，不随 npm 包发布。

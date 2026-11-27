@@ -1,0 +1,4 @@
+# pnpm 12 起构建脚本白/黑名单放在 pnpm-workspace.yaml 的 allowBuilds。
+# protobufjs 只是 devDependencies 里 pi 包的传递依赖，不需要执行安装脚本。
+allowBuilds:
+  protobufjs: false
