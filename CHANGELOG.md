@@ -2,6 +2,12 @@
 
 本项目的版本变更记录。Pi 在包升级后会读取本文件（`package.json` 的 `version` 增长时生效）。
 
+## [0.1.2] - 未发布
+
+### Changed
+
+- 内部：测试改用 TypeScript（`test/*.test.ts`），并纳入 `pnpm run typecheck`；无功能变更。
+
 ## [0.1.0] - 2026-11-27
 
 ### Added

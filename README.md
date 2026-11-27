@@ -77,8 +77,9 @@ pnpm run test:compat -- --verbose 1.6.0 # 失败时打印完整测试输出
   内容上：按 pi 的挂载方式搭一段 transcript，验证 `jump.ts` 与 `logic.ts` 对 pi 的假设：布局字段是否存在、
   OSC 133;A 标记数量与序号是否与推算一致、标记法和文本匹配兜底是否都落在正确行。
   pi 改了内部实现时，失败信息会指出是哪个字段或规则变了。
-  （几处 `as unknown as` 是故意的：`findTranscript` 只暴露 `jump.ts` 需要的最小接口，测试要读 `ScrollView.scrollTop`
-  和 `TuiAltScreen.currentLayout` 这类内部字段，必须显式放宽类型。）
+  （只剩一处 `as unknown as`：`AssistantMessage` 必填的 `api`/`provider`/`model`/`usage` 与渲染无关，
+  fixture 不构造它们。读 `scrollTop` 用自己 `new` 的 ScrollView 实例、读私有的 `currentLayout` 用 `Reflect.get`，
+  都不需要断言。）
 - 升级 pi 前后，运行 `pnpm run test:compat`；失败时先看失败信息指出的是哪条假设：跳转相关的改 `src/jump.ts`，
   标记数量/顺序相关（OSC 133;A 由哪些消息写入）的改 `src/logic.ts` 里镜像 pi 渲染规则的部分
   （`assistantWritesMarker`、`renderedUserText`）。
