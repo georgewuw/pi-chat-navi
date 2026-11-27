@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # npm provenance
+  id-token: write # OIDC trusted publishing
 
 jobs:
   publish:
@@ -21,13 +21,19 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: pnpm
+          node-version: 24
           registry-url: https://registry.npmjs.org
+
+      # trusted publishing 需要 npm >= 11.5.1；显式升级避免 Node 自带版本过旧
+      - name: Ensure npm supports OIDC
+        run: |
+          npm install --global npm@latest
+          npm --version
 
       - run: pnpm install --frozen-lockfile
 
-      # prepublishOnly 会执行 typecheck + 测试
-      - run: pnpm publish --provenance --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: pnpm run check
+
+      # 使用 npm publish（不是 pnpm publish），由 npm CLI 完成 OIDC token 交换。
+      # 不再需要 NPM_TOKEN；prepublishOnly 会再跑一次 typecheck + 测试。
+      - run: npm publish
